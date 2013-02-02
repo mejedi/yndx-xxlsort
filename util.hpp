@@ -1,15 +1,8 @@
-/*
- * This is going to be C++11 since we are going to use shared_ptr but
- * requiring boost would be lame :)
- *
- * Targeting POSIX.
- *
- */
 #pragma once
 
 #include <memory>
 #include <string>
-#include <cassert>
+#include <cstdint>
 
 
 std::string format_message(const char *fmt, ...);
@@ -39,10 +32,10 @@ class file_id
 {
     public:
         static file_id_t create_with_path(const std::string &path);
-        static file_id_t create_temporary();
+        static file_id_t create_temporary(const std::string &name_template = std::string());
 
         const std::string &get_path() const { return path; }
-        void set_auto_unlink(bool enable) { auto_unlink = enable; }
+        void set_auto_unlink(bool auto_unlink_) { auto_unlink = auto_unlink_; }
 
         ~file_id();
         file_id(const std::string &path_, bool auto_unlink_)
@@ -59,62 +52,46 @@ class file_id
 /*
  * Glorified raw memory chunk
  */
-struct mem_chunk
+class mem_chunk
 {
-    uint8_t *p;
-    size_t size;
+    public:
+        enum {
+            ALIGNMENT_MAX = 64 * KiB
+        };
 
-    enum {
-        ALIGNMENT_MAX = 64 * KiB
-    };
-
-    mem_chunk(void *p_ = 0, size_t size_ = 0)
-        : p(static_cast<uint8_t *>(p_)), size(size_) { ; }
-    bool empty() const { return size == 0; }
-    uint8_t *begin() const { return p; }
-    uint8_t *end() const { return p + size; }
-    inline mem_chunk aligned(size_t n) const;
-    mem_chunk sub_chunk(size_t offset, size_t size_) const
-    {
-        size_t origin = std::min(offset, size);
-        return mem_chunk(p + origin, std::min(size_, size - origin));
-    }
-    void split_at(size_t pos, mem_chunk &left, mem_chunk &right)
-    {
-        uint8_t *p = this->p;
-        size_t size = this->size;
-        pos = std::min(pos, size);
-        left = mem_chunk(p, pos);
-        right = mem_chunk(p + pos, size - pos);
-    }
-    void append(const mem_chunk &other)
-    {
-        if (end() != other.begin()) {
-            memcpy(end(), other.p, other.size);
+        mem_chunk(void *p_ = 0, size_t size = 0)
+            : p(static_cast<uint8_t *>(p_)), sz(size) { ; }
+        bool empty() const { return sz == 0; }
+        uint8_t *begin() const { return p; }
+        uint8_t *end() const { return p + sz; }
+        size_t size() const { return sz; }
+        mem_chunk aligned(size_t n) const;
+        mem_chunk sub_chunk(size_t offset, size_t size) const
+        {
+            size_t origin = std::min(offset, sz);
+            return mem_chunk(p + origin, std::min(size, sz - origin));
         }
-        size += other.size;
-    }
-    void zero_memory() const { memset(p, 0, size); }
+        void split_at(size_t pos, mem_chunk &left, mem_chunk &right) const
+        {
+            uint8_t *p = this->p;
+            size_t size = this->sz;
+            pos = std::min(pos, size);
+            left = mem_chunk(p, pos);
+            right = mem_chunk(p + pos, size - pos);
+        }
+        void append(const mem_chunk &other)
+        {
+            if (end() != other.begin()) {
+                memcpy(end(), other.p, other.sz);
+            }
+            sz += other.sz;
+        }
+        void zero_memory() const { memset(p, 0, sz); }
+
+    private:
+        uint8_t *p;
+        size_t sz;
 };
-
-
-inline void assert_alignment_valid(size_t n)
-{
-    assert(n > 0);
-    assert((n & (n - 1)) == 0);
-    assert(n <= mem_chunk::ALIGNMENT_MAX);
-}
-
-
-mem_chunk mem_chunk::aligned(size_t n) const
-{
-    assert_alignment_valid(n);
-
-    auto origin = reinterpret_cast<uintptr_t>(p);
-    auto res = sub_chunk(((origin + n - 1) & ~(n - 1)) - origin, -1);
-    res.size &= ~(n - 1);
-    return res;
-}
 
 
 /*
@@ -169,7 +146,7 @@ class output_file: public file_base
 
 /*
  * Controls some aspect of T representation produced by
- * render_buf::put<T> and consumed by parse_buf::read<T>.
+ * render_buf::put<T> and consumed by parse_buf::get<T>.
  */
 template <typename T>
 struct repr_traits
@@ -189,10 +166,10 @@ class render_buf
         render_buf(const mem_chunk &mem, const file_id_t &output_file_id = file_id_t());
         void flush();
         mem_chunk get_free_mem();
-        void *put(const mem_chunk &data);
+        void *write(const mem_chunk &data);
         void skip(size_t num_bytes);
         void align(size_t n);
-        file_pos_t get_file_pos() const { return f.get_file_pos() + data.size; }
+        file_pos_t get_file_pos() const { return f.get_file_pos() + data.size(); }
 
         template <typename T>
         T *put(const T &v)
@@ -201,8 +178,10 @@ class render_buf
                 align(repr_traits<T>::ALIGNMENT);
             }
             mem_chunk c(const_cast<T*>(&v), repr_traits<T>::SIZE);
-            return static_cast<T *>(put(c));
+            return static_cast<T *>(write(c));
         }
+
+        void put(const mem_chunk &) = delete;
 
     private:
         output_file     f;
@@ -219,17 +198,19 @@ class parse_buf
         bool read(mem_chunk &bytes);
         void skip(size_t num_bytes);
         void align(size_t n);
-        file_pos_t get_file_pos() const { return f.get_file_pos() - data.size; }
+        file_pos_t get_file_pos() const { return f.get_file_pos() - data.size(); }
 
         template <typename T>
-        bool read(T &v)
+        bool get(T &v)
         {
             if (repr_traits<T>::ALIGNMENT != 1) {
                 align(repr_traits<T>::ALIGNMENT);
             }
             mem_chunk c(&v, repr_traits<T>::SIZE);
-            return read(c) && c.size == repr_traits<T>::SIZE;
+            return read(c) && c.size() == repr_traits<T>::SIZE;
         }
+
+        void get(mem_chunk &) = delete;
 
     private:
         input_file      f;
@@ -250,6 +231,7 @@ class parser
         )
             : buf(mem, input_file_id), hd_valid(false), body_bytes_left(0)
         {
+            parse_next();
         }
         /*
          * Skip over the current record if any and parse another one.
@@ -266,19 +248,22 @@ class parser
          * Get current record's header (precondition: preceeding call to
          * parse_next() returned true)
          */
-        header_t &get_header() const { return hd; }
+        const header_t &get_header() const { return hd; }
         /*
          * Read current record's body. Updates mem size. Returns false
          * when the body is over.
          */
         bool read_body(mem_chunk &body_chunk)
         {
-            size_t chunk_size = body_chunk.size = std::min(body_chunk.size, body_bytes_left);
+            size_t chunk_size = std::min(
+                body_chunk.size(), static_cast<size_t>(body_bytes_left));
+
+            body_chunk = body_chunk.sub_chunk(0, chunk_size);
             if (chunk_size == 0) {
                 return false;
             }
-            buf.read(body_chunk, chunk_size);
-            if (body_chunk.size != chunk_size) {
+            buf.read(body_chunk);
+            if (body_chunk.size() != chunk_size) {
                 throw std::runtime_error("Data corrupt");
             }
             body_bytes_left -= chunk_size;

@@ -1,11 +1,35 @@
 #include "util.hpp"
 
+#include <stdexcept>
 #include <cerrno>
+#include <cassert>
+#include <cstdarg>
+
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <err.h>
+#include <limits.h>
+
+
+inline void assert_alignment_valid(size_t n)
+{
+    assert(n > 0);
+    assert((n & (n - 1)) == 0);
+    assert(n <= mem_chunk::ALIGNMENT_MAX);
+}
+
+
+mem_chunk mem_chunk::aligned(size_t n) const
+{
+    assert_alignment_valid(n);
+
+    auto origin = reinterpret_cast<uintptr_t>(p);
+    auto res = sub_chunk(((origin + n - 1) & ~(n - 1)) - origin, -1);
+    res.sz &= ~(n - 1);
+    return res;
+}
 
 
 file_id_t file_id::create_with_path(const std::string &path)
@@ -14,19 +38,37 @@ file_id_t file_id::create_with_path(const std::string &path)
 }
 
 
-file_id_t file_id::create_temporary()
+file_id_t file_id::create_temporary(const std::string &name_template)
 {
-    char name_buf[] = "/tmp/yndx-xxlsort-XXXXXX";
-    int fd = mkstemp(name_buf);
+    std::string path;
+    path.reserve(PATH_MAX);
+
+    const char *tmp_dir;
+    (tmp_dir = getenv("TMP"))
+        || (tmp_dir = getenv("TEMP"))
+        || (tmp_dir = getenv("TMPDIR"))
+        || (tmp_dir = "/tmp");
+
+    path.append(tmp_dir);
+    path.append("/");
+    if (name_template.empty()) {
+        path.append("XXXXXX");
+    } else {
+        path.append(name_template);
+        path.append("-XXXXXX");
+    }
+
+    /* sort of a bad hack but who cares anyway? */
+    int fd = mkstemp(const_cast<char *>(path.c_str()));
     if (fd == -1) {
         std::string message = format_message_with_errno(
             errno, "Creating temporary file");
         throw std::runtime_error(message);
     }
     if (close(fd) == -1) {
-        warn("Closing %s", name_buf);
+        warn("Closing %s", path.c_str());
     }
-    return std::make_shared<file_id>(name_buf, /* auto_unlink: */ true);
+    return std::make_shared<file_id>(path, /* auto_unlink: */ true);
 }
 
 
@@ -122,7 +164,7 @@ input_file::input_file(const file_id_t &id)
 
 bool input_file::read(mem_chunk &data)
 {
-    uint8_t *p = data.p, *e = p + data.size;
+    uint8_t *p = data.begin(), *e = data.end();
     while (p < e) {
         ssize_t s = ::read(get_fd(), p, e - p);
         if (s == 0) {
@@ -137,8 +179,8 @@ bool input_file::read(mem_chunk &data)
             throw std::runtime_error(message);
         }
     }
-    data.size = p - data.p;
-    return (data.size > 0);
+    data = mem_chunk(data.begin(), p - data.begin());
+    return (data.size() > 0);
 }
 
 
@@ -150,7 +192,7 @@ output_file::output_file(const file_id_t &id)
 
 void output_file::write(const mem_chunk &data)
 {
-    uint8_t *p = data.p, *e = p + data.size;
+    uint8_t *p = data.begin(), *e = data.end();
     while (p < e) {
 
         ssize_t s = ::write(get_fd(), p, e - p);
@@ -191,7 +233,7 @@ void render_buf::flush()
 {
     f.write(data);
     /* to keep memory/file alignment in sync */
-    data = data.sub_chunk(data.size, -1);
+    data = data.sub_chunk(data.size(), -1);
     f.flush();
 }
 
@@ -208,7 +250,7 @@ mem_chunk render_buf::get_free_mem()
 }
 
 
-void *render_buf::put(const mem_chunk &bytes_)
+void *render_buf::write(const mem_chunk &bytes_)
 {
     void *origin;
     mem_chunk bytes = bytes_;
@@ -216,7 +258,7 @@ void *render_buf::put(const mem_chunk &bytes_)
         mem_chunk free_mem = get_free_mem();
         origin = data.end(); /* a possibility for funny results here */
         mem_chunk put_portion;
-        bytes.split_at(free_mem.size, put_portion, bytes);
+        bytes.split_at(free_mem.size(), put_portion, bytes);
         data.append(put_portion);
     }
     return origin;
@@ -228,8 +270,8 @@ void render_buf::skip(size_t num_bytes)
     while (num_bytes > 0) {
         mem_chunk buf = get_free_mem().sub_chunk(0, num_bytes);
         buf.zero_memory();
-        put(buf);
-        num_bytes -= buf.size;
+        write(buf);
+        num_bytes -= buf.size();
     }
 }
 
@@ -252,7 +294,7 @@ parse_buf::parse_buf(const mem_chunk &mem_, const file_id_t &id)
 bool parse_buf::read(mem_chunk &bytes_)
 {
     mem_chunk bytes = bytes_.sub_chunk(0, 0);
-    while (bytes.size < bytes_.size) {
+    while (bytes.size() < bytes_.size()) {
         if (data.empty()) {
             /* to keep memory/file alignment in sync */
             data = mem.sub_chunk(
@@ -262,7 +304,7 @@ bool parse_buf::read(mem_chunk &bytes_)
             }
         }
         mem_chunk read_portion;
-        data.split_at(bytes_.size - bytes.size, read_portion, data);
+        data.split_at(bytes_.size() - bytes.size(), read_portion, data);
         bytes.append(read_portion);
     }
     bytes_ = bytes;
@@ -272,10 +314,10 @@ bool parse_buf::read(mem_chunk &bytes_)
 
 void parse_buf::skip(size_t num_bytes)
 {
-    if (num_bytes <= data.size) {
+    if (num_bytes <= data.size()) {
         data = data.sub_chunk(num_bytes, -1);
     } else {
-        num_bytes -= data.size;
+        num_bytes -= data.size();
         data = mem_chunk();
         f.set_file_pos(f.get_file_pos() + num_bytes);
     }
