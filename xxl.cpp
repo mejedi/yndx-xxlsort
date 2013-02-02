@@ -131,7 +131,10 @@ class merge_element
         }
         bool operator < (const merge_element &other) const
         {
-            return memcmp(key, other.key, sizeof(record_header::key)) < 0;
+            /* in fact this is >=, since the operator is used by
+             * std::make_/push_/pop_heap functions which put the largest
+             * element on the top of the heap while we want the smallest */
+            return memcmp(key, other.key, sizeof(record_header::key)) >= 0;
         }
         bool output_record_and_parse_next(render_buf &output)
         {
