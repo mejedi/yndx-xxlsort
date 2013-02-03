@@ -224,7 +224,7 @@ void output_file::flush()
 
 
 render_buf::render_buf(const mem_chunk &mem_, const file_id_t &id)
-    : f(id), mem(mem_.aligned(mem_chunk::ALIGNMENT_MAX)), data(mem.sub_chunk(0, 0))
+    : f(id), mem(mem_.aligned()), data(mem.sub_chunk(0, 0))
 {
 }
 
@@ -286,7 +286,7 @@ void render_buf::align(size_t n)
 
 
 parse_buf::parse_buf(const mem_chunk &mem_, const file_id_t &id)
-    : f(id), mem(mem_.aligned(mem_chunk::ALIGNMENT_MAX))
+    : f(id), mem(mem_.aligned())
 {
 }
 
@@ -372,7 +372,8 @@ std::string format_message_with_errno(int error, const char *fmt, ...)
     if (!formatter.message) {
         throw std::bad_alloc();
     }
+    strerror_r(error, error_buf, sizeof error_buf);
     return format_message(
-        "%s: %s", formatter.message, strerror_r(error, error_buf, sizeof error_buf));
+        "%s: %s", formatter.message, error_buf);
 }
 

@@ -5,16 +5,13 @@
 #include <cstdint>
 
 
+static const size_t KiB = 1024;
+static const size_t MiB = 1024 * KiB;
+static const size_t GiB = 1024 * MiB;
+
+
 std::string format_message(const char *fmt, ...);
 std::string format_message_with_errno(int error, const char *fmt, ...);
-
-
-enum
-{
-    KiB = 1024,
-    MiB = 1024 * KiB,
-    GiB = 1024 * MiB
-};
 
 
 typedef uint64_t file_pos_t, file_size_t;
@@ -65,7 +62,7 @@ class mem_chunk
         uint8_t *begin() const { return p; }
         uint8_t *end() const { return p + sz; }
         size_t size() const { return sz; }
-        mem_chunk aligned(size_t n) const;
+        mem_chunk aligned(size_t n = ALIGNMENT_MAX) const;
         mem_chunk sub_chunk(size_t offset, size_t size) const
         {
             size_t origin = std::min(offset, sz);
