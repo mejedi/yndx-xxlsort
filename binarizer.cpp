@@ -76,9 +76,10 @@ int main()
             std::uniform_int_distribution<uint64_t> random_qword;
 
             file_size_t i = body_size;
+            int n = (std::min(i, file_size_t(1024))+7)/8;
             while (i != 0) {
                 uint64_t buf[128];
-                for (int j=0; j<128; j++) {
+                for (int j=0; j<n; j++) {
                     buf[j] = random_qword(rng);
                 }
                 auto chunk = mem_chunk(&buf, std::min(i, file_size_t(1024)));
