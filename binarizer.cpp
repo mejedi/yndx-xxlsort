@@ -71,11 +71,19 @@ int main()
 
             output.put(hd);
 
+            /* random body */
             std::mt19937 rng(body_seed);
-            std::uniform_int_distribution<uint8_t> random_byte;
+            std::uniform_int_distribution<uint64_t> random_qword;
 
-            for (file_size_t i=0; i<body_size; i++) {
-                output.put(random_byte(rng));
+            file_size_t i = body_size;
+            while (i != 0) {
+                uint64_t buf[128];
+                for (int j=0; j<128; j++) {
+                    buf[j] = random_qword(rng);
+                }
+                auto chunk = mem_chunk(&buf, std::min(i, file_size_t(1024)));
+                output.write(chunk);
+                i -= chunk.size();
             }
         }
         output.flush();

@@ -216,7 +216,7 @@ void output_file::flush()
             continue;
         }
 
-        if (errno == EINVAL) {
+        if (errno == EINVAL || errno == ENOTSUP) {
             /* socket, pipe, etc */
             return;
         }
