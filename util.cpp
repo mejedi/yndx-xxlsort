@@ -216,6 +216,11 @@ void output_file::flush()
             continue;
         }
 
+        if (errno == EINVAL) {
+            /* socket, pipe, etc */
+            return;
+        }
+
         std::string message = format_message_with_errno(
             errno, "Flushing %s", get_file_path().c_str());
         throw std::runtime_error(message);
