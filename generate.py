@@ -18,7 +18,7 @@ def generate(size_spec, rng):
         flags = randint(0, 0xffffffffffffffff)
         crc = randint(0, 0xffffffffffffffff)
         seed = randint(0, 0xffffffffffffffff)
-        body_size = int(rng()) 
+        body_size = min(int(rng()), 100*1024*1024) 
 
         print key, flags, crc, body_size, seed
         generated += 88 + body_size
