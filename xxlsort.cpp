@@ -141,7 +141,7 @@ class sort_element
         static void init(sort_element &i, record_header2 *p)
         {
             memcpy(i.prefix, p->key, sizeof i.prefix);
-            i.offset = reinterpret_cast<uintptr_t>(p) - reinterpret_cast<uintptr_t>(base);
+            i.offset = (reinterpret_cast<uintptr_t>(p) - reinterpret_cast<uintptr_t>(base)) / 64;
         }
         bool operator < (const sort_element &other) const
         {
@@ -157,7 +157,8 @@ class sort_element
         }
         const record_header2 &get_header() const
         {
-            return *reinterpret_cast<record_header2 *>(reinterpret_cast<uintptr_t>(base) + offset);
+            return *reinterpret_cast<record_header2 *>(
+                reinterpret_cast<uintptr_t>(base) + uintptr_t(offset) * 64);
         }
         mem_chunk get_body() const
         {
