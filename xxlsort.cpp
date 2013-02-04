@@ -347,6 +347,10 @@ void merge_sorted(
             }
         }
 
+        if (input_streams.size()<2) {
+            throw std::runtime_error("Not enough memory for merge phase");
+        }
+
         bool is_final = transient_files.empty();
         file_id_t output_file_id;
 
