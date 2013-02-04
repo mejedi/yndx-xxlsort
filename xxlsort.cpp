@@ -121,22 +121,58 @@ void export_record(const record_header2 &hd2, render_buf &output, input_file &in
 }
 
 
+/*
+ * In split and sort phase we are sorting a portion of input data in
+ * memory. The portion is as large as available memory permits. Normally
+ * one would sort array of pointers since records are bulk and of the
+ * variable length.
+ *
+ * We are playing clever here. Instead of a simple array of pointers an
+ * array of structures consisting of a key prefix plus a pointer to the
+ * respective record is sorted. Benchmark shows up to 4x better
+ * resulting performance.
+ *
+ * Finally to allow for a larger prefix while keeping the size of
+ * the structure unchanged an offset is stored instead of a pointer.
+ */
 class sort_element
 {
     public:
-        static void init(sort_element &i, record_header2 *p) { i.p = p; }
+        static void init(sort_element &i, record_header2 *p)
+        {
+            memcpy(i.prefix, p->key, sizeof i.prefix);
+            i.offset = reinterpret_cast<uintptr_t>(p) - reinterpret_cast<uintptr_t>(base);
+        }
         bool operator < (const sort_element &other) const
         {
-            return memcmp(p->key, other.p->key, sizeof p->key) < 0;
+            int s = memcmp(prefix, other.prefix, sizeof prefix);
+            if (s!=0) {
+                return s < 0;
+            } else {
+                return memcmp(
+                    get_header().key + sizeof prefix,
+                    other.get_header().key + sizeof prefix,
+                    sizeof(record_header::key) - sizeof prefix) < 0;
+            }
         }
-        const record_header2 &get_header() const { return *p; }
+        const record_header2 &get_header() const
+        {
+            return *reinterpret_cast<record_header2 *>(reinterpret_cast<uintptr_t>(base) + offset);
+        }
         mem_chunk get_body() const
         {
-            return mem_chunk(p->body, p->is_body_present ? p->body_size : 0);
+            record_header2 &hd = const_cast<record_header2 &>(get_header());
+            return mem_chunk(hd.body, hd.is_body_present ? hd.body_size : 0);
         }
     private:
-        record_header2 *p;
+        uint8_t    prefix[12];
+        uint32_t   offset;
+    public:
+        static void *base;
 };
+
+
+void *sort_element::base;
 
 
 void split_and_sort(
@@ -389,6 +425,7 @@ int main(int argc, char ** argv)
                     errno,
                     "Allocating %zu bytes of memory", size));
         }
+        sort_element::base = p;
 
         mem_chunk available_mem = mem_chunk(p, size).aligned();
 
