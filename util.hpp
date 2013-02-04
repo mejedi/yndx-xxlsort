@@ -53,7 +53,7 @@ class mem_chunk
 {
     public:
         enum {
-            ALIGNMENT_MAX = 64 * KiB
+            ALIGNMENT_MAX = 4 * KiB
         };
 
         mem_chunk(void *p_ = 0, size_t size = 0)
@@ -252,8 +252,7 @@ class parser
          */
         bool read_body(mem_chunk &body_chunk)
         {
-            size_t chunk_size = std::min(
-                body_chunk.size(), static_cast<size_t>(body_bytes_left));
+            size_t chunk_size = std::min<file_size_t>(body_chunk.size(), body_bytes_left);
 
             body_chunk = body_chunk.sub_chunk(0, chunk_size);
             if (chunk_size == 0) {
