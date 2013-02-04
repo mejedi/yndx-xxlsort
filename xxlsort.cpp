@@ -10,8 +10,12 @@
 #include <stdexcept>
 #include <cstdio>
 #include <cerrno>
+#include <cinttypes>
 
 
+/*
+ * Public header format
+ */
 struct record_header {
     uint8_t        key[64];
     uint64_t       flags;
@@ -32,8 +36,33 @@ struct repr_traits<record_header>
 };
 
 
-/* Invoked by parser<record_header>::parse_next() */
-bool parse_header(parse_buf &buf, record_header &external_hd, record_header &hd, file_size_t &body_size)
+/*
+ * Private extended format
+ */
+struct alignas(64) record_header2 {
+    uint8_t        key[64];
+    uint64_t       flags;
+    uint64_t       crc;
+    file_size_t    body_size;
+    file_pos_t     body_pos;
+    uint8_t        is_body_present;
+    uint8_t        body[1];
+};
+
+
+template <>
+struct repr_traits<record_header2>
+{
+    enum
+    {
+        ALIGNMENT = 16,
+        SIZE = offsetof(record_header2, body)
+    };
+};
+
+
+/* Used by parser<record_header2, record_header> */
+bool parse_header(parse_buf &buf, record_header &external_hd, record_header2 &hd, file_size_t &body_size)
 {
     if (!buf.get(external_hd)) {
         return false;
@@ -41,27 +70,72 @@ bool parse_header(parse_buf &buf, record_header &external_hd, record_header &hd,
     if (external_hd.body_size > 100 * MiB) {
         throw std::runtime_error("Malformed data");
     }
-    hd = external_hd; /* same format */
+    memcpy(hd.key, external_hd.key, sizeof(record_header::key));
+    hd.flags = external_hd.flags;
+    hd.crc = external_hd.crc;
+    hd.body_size = external_hd.body_size;
+    hd.body_pos = buf.get_file_pos();
+    hd.is_body_present = 1;
     body_size = hd.body_size;
     return true;
+}
+
+
+/* Used by parser<record_header2> */
+bool parse_header(parse_buf &buf, record_header2 &external_hd, record_header2 &hd, file_size_t &body_size)
+{
+    if (!buf.get(hd)) {
+        return false;
+    }
+    body_size = (hd.is_body_present ? hd.body_size : 0);
+    return true;
+}
+
+
+/* convert record_header2 -> record_header and fetch external body */
+void export_record(const record_header2 &hd2, render_buf &output, input_file &input)
+{
+    record_header hd;
+    memcpy(hd.key, hd2.key, sizeof(record_header::key));
+    hd.flags = hd2.flags;
+    hd.crc = hd2.crc;
+    hd.body_size = hd2.body_size;
+    output.put(hd);
+
+    if (!hd2.is_body_present) {
+        input.set_file_pos(hd2.body_pos);
+        file_size_t sz = hd2.body_size;
+        while (sz != 0) {
+            mem_chunk buf = output.get_free_mem().sub_chunk(0, std::min<file_size_t>(sz, SIZE_MAX));
+            if (!input.read(buf)) {
+                throw std::runtime_error(
+                    format_message(
+                        "Data corrupt %s (+%"PRId64")",
+                        input.get_file_path().c_str(),
+                        input.get_file_pos()));
+            }
+            output.write(buf);
+            sz -= buf.size();
+        }
+    }
 }
 
 
 class sort_element
 {
     public:
-        static void init(sort_element &i, record_header *p) { i.p = p; }
+        static void init(sort_element &i, record_header2 *p) { i.p = p; }
         bool operator < (const sort_element &other) const
         {
             return memcmp(p->key, other.p->key, sizeof p->key) < 0;
         }
-        const record_header &get_header() const { return *p; }
+        const record_header2 &get_header() const { return *p; }
         mem_chunk get_body() const
         {
-            return mem_chunk(p->body, p->body_size);
+            return mem_chunk(p->body, p->is_body_present ? p->body_size : 0);
         }
     private:
-        record_header *p;
+        record_header2 *p;
 };
 
 
@@ -75,7 +149,9 @@ void split_and_sort(
     mem_chunk available_mem;
     available_mem_.split_at(4 * MiB, input_mem, available_mem);
 
-    parser<record_header> input(input_mem, src_file);
+    parser<record_header2, record_header> input(input_mem, src_file);
+    input_file input2(src_file);
+    file_size_t threshold = input2.is_seekable() ? 1 * MiB : -1;
 
     int segment_no = 0;
 
@@ -98,18 +174,28 @@ void split_and_sort(
         while (input.is_header_valid()) {
             size_t available_sz = membuf.get_free_mem().size();
             size_t reserved_sz = (ve - vb + 1)*(sizeof *vb);
-            const record_header &hd = input.get_header();
+            size_t body_sz;
+            record_header2 hd = input.get_header();
 
-            if (available_sz < alignof(hd) + sizeof(hd) + hd.body_size + reserved_sz) {
+            if (hd.body_size >= threshold) {
+                hd.is_body_present = 0;
+                body_sz = 0;
+            } else {
+                body_sz = hd.body_size;
+            }
+
+            if (available_sz < alignof(hd) + sizeof(hd) + body_sz + reserved_sz) {
                 break;
             }
 
             membuf.align(alignof(hd));
             sort_element::init(*(--vb), membuf.put(hd));
 
-            mem_chunk buf = membuf.get_free_mem();
-            input.read_body(buf);
-            membuf.write(buf);
+            if (hd.is_body_present) {
+                mem_chunk buf = membuf.get_free_mem();
+                input.read_body(buf);
+                membuf.write(buf);
+            }
 
             input.parse_next();
         }
@@ -127,7 +213,13 @@ void split_and_sort(
 
         render_buf output(output_mem, output_file_id);
         for (sort_element *i = vb; i != ve; i++) {
-            output.put(i->get_header());
+            if (is_final) {
+                /* export public format (record_header) */
+                export_record(i->get_header(), output, input2);
+            } else {
+                /* write private extended format (record_header2) */
+                output.put(i->get_header());
+            }
             output.write(i->get_body());
         }
         output.flush();
@@ -140,7 +232,7 @@ void split_and_sort(
 class merge_element
 {
     public:
-        merge_element(parser<record_header> &stream_)
+        merge_element(parser<record_header2> &stream_)
         {
             stream = &stream_;
         }
@@ -156,6 +248,21 @@ class merge_element
         bool write_record_and_parse_next(render_buf &output)
         {
             output.put(stream->get_header());
+            copy_inline_body(output);
+            return stream->parse_next();
+        }
+        bool export_record_and_parse_next(render_buf &output, input_file &input)
+        {
+            const record_header2 &hd2 = stream->get_header();
+            export_record(hd2, output, input);
+            copy_inline_body(output);
+            return stream->parse_next();
+        }
+    private:
+        parser<record_header2>  *stream;
+    private:
+        void copy_inline_body(render_buf &output)
+        {
             while (1) {
                 mem_chunk buf = output.get_free_mem();
                 if (!stream->read_body(buf)) {
@@ -163,20 +270,20 @@ class merge_element
                 }
                 output.write(buf);
             }
-            return stream->parse_next();
         }
-    private:
-        parser<record_header>   *stream;
 };
 
 
 void merge_sorted(
     const mem_chunk &available_mem_,
+    const file_id_t &src_file,
     const file_id_t &dest_file,
     std::deque<file_id_t> &transient_files)
 {
-    std::vector<std::unique_ptr<parser<record_header>>> input_streams;
+    std::vector<std::unique_ptr<parser<record_header2>>> input_streams;
     std::vector<merge_element> merger;
+
+    input_file input(src_file);
 
     while (!transient_files.empty())
     {
@@ -193,8 +300,8 @@ void merge_sorted(
             mem_chunk input_buf_mem;
             available_mem.split_at(input_buf_size, input_buf_mem, available_mem);
 
-            std::unique_ptr<parser<record_header>> p(
-                new parser<record_header>(input_buf_mem, transient_files.front()));
+            std::unique_ptr<parser<record_header2>> p(
+                new parser<record_header2>(input_buf_mem, transient_files.front()));
             transient_files.pop_front();
 
             if (p->is_header_valid()) {
@@ -220,7 +327,16 @@ void merge_sorted(
 
             std::pop_heap(merger.begin(), merger.end());
 
-            if (merger.back().write_record_and_parse_next(output)) {
+            bool has_more;
+            if (is_final) {
+                /* export public format (record_header) */
+                has_more = merger.back().export_record_and_parse_next(output, input);
+            } else {
+                /* write private extended format (record_header2) */
+                has_more = merger.back().write_record_and_parse_next(output);
+            }
+
+            if (has_more) {
                 std::push_heap(merger.begin(), merger.end());
             } else {
                 merger.pop_back();
@@ -283,7 +399,7 @@ int main(int argc, char ** argv)
 
         std::deque<file_id_t> transient_files;
         split_and_sort(available_mem, src_file, dest_file, transient_files);
-        merge_sorted(available_mem, dest_file, transient_files);
+        merge_sorted(available_mem, src_file, dest_file, transient_files);
 
         dest_file->set_auto_unlink(false);
 
