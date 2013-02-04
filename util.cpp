@@ -333,7 +333,7 @@ void parse_buf::align(size_t n)
 {
     assert_alignment_valid(n);
 
-    auto origin = reinterpret_cast<uintptr_t>(data.end());
+    auto origin = reinterpret_cast<uintptr_t>(data.begin());
     skip(((origin + n - 1) & ~(n - 1)) - origin);
 }
 
